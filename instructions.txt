@@ -1,0 +1,417 @@
+Below is a practical MVP scaffold (Next.js + Postgres + Prisma + shadcn/ui) designed around the real Brazilian data sources you’ll actually use at the start: SINAPI (CAIXA/IBGE) for itemized costs and CUB (Sinduscon) for sanity-check baselines.
+
+I’m giving you:
+	1.	Best starter template(s) you can clone/deploy on Vercel immediately
+	2.	A ready project structure for cost simulation + data ingestion
+	3.	Scripts & schemas that assume you’ll ingest from SINAPI/CUB downloads (not a clean API)
+	4.	Minimal “Day-1 dataset strategy” so you can ship MVP without waiting for perfect data
+
+⸻
+
+1) Start from this Vercel-ready base
+
+Option A (recommended): Vercel Postgres + Auth + Tailwind starter
+	•	Repo: https://github.com/vercel/nextjs-postgres-nextauth-tailwindcss-template
+(If that exact repo name changes, search “Vercel Postgres NextAuth Tailwind template” on GitHub—Vercel keeps official starters updated.)
+
+Option B: Next.js SaaS starter (heavier, if you want billing soon)
+	•	Repo: https://github.com/nextjs/saas-starter
+
+For your MVP (Brazil-first, validate fast), Option A is usually the fastest path.
+
+⸻
+
+2) The data sources you’ll need (Brazil)
+
+SINAPI (itemized cost compositions)
+
+SINAPI is the national reference for costs and indices; CAIXA publishes monthly reports/downloads.  ￼
+Reality check: SINAPI is typically monthly files (PDF/XLS/ZIP), not a clean JSON API. You’ll ingest these.
+
+CUB (quick baseline cost per m²)
+
+Sinduscon-SP publishes CUB tables (including “Download da série histórica”).  ￼
+This is useful for:
+	•	sanity-checking your estimator totals vs “typical R$/m²”
+	•	a fallback baseline when user inputs are sparse
+
+⸻
+
+3) MVP architecture (what you’re actually building first)
+
+Goal (MVP)
+	•	“Create renovation estimate” wizard
+	•	Output: cost breakdown by room + category, adjustable options
+	•	Save project + export estimate (PDF later)
+
+Key constraint
+
+Your pricing won’t be perfect at first—so:
+	•	ship with curated default price packs for São Paulo (materials + labor)
+	•	show confidence ranges + disclaimers
+	•	progressively replace defaults with SINAPI/CUB ingested data
+
+⸻
+
+4) Repo scaffold (copy/paste)
+
+File tree
+
+renovai-mvp/
+  app/
+    (marketing)/
+      page.tsx
+    app/
+      layout.tsx
+      dashboard/
+        page.tsx
+      projects/
+        new/
+          page.tsx
+        [id]/
+          page.tsx
+    api/
+      estimate/
+        route.ts
+      sources/
+        refresh/
+          route.ts
+  components/
+    EstimateWizard.tsx
+    CostBreakdownTable.tsx
+    Currency.tsx
+  lib/
+    estimate/
+      engine.ts
+      rules.ts
+      catalog.ts
+    sources/
+      sinapi.ts
+      cub.ts
+      normalize.ts
+  prisma/
+    schema.prisma
+    seed.ts
+  scripts/
+    sources/
+      fetch-sinapi.ts
+      fetch-cub-sindusconsp.ts
+  package.json
+  .env.example
+
+
+⸻
+
+5) Prisma schema (projects + catalog + sources)
+
+Create prisma/schema.prisma:
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Project {
+  id          String   @id @default(cuid())
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  title       String
+  city        String   @default("São Paulo")
+  state       String   @default("SP")
+  currency    String   @default("BRL")
+  inputs      Json     // wizard inputs snapshot
+  estimate    Json     // computed breakdown snapshot
+  total       Float    @default(0)
+}
+
+model PriceSource {
+  id        String   @id @default(cuid())
+  kind      String   // "SINAPI" | "CUB"
+  region    String   // "SP" | "BR"
+  refMonth  String   // "2025-12"
+  url       String?
+  fetchedAt DateTime @default(now())
+  raw       Json     // metadata about parsed files
+}
+
+model CatalogItem {
+  id          String   @id @default(cuid())
+  sku         String?  @unique
+  name        String
+  category    String   // "flooring" | "paint" | "hydraulics" | "cabinetry"...
+  unit        String   // "m2" | "m" | "un" | "hour"
+  basePrice   Float    // fallback price (SP)
+  minPrice    Float?
+  maxPrice    Float?
+  sourceKind  String?  // "SINAPI" | "manual"
+  sourceRef   String?  // e.g. SINAPI code
+  updatedAt   DateTime @updatedAt
+}
+
+
+⸻
+
+6) Seed data strategy (so you can ship immediately)
+
+Create prisma/seed.ts with a tiny curated pack (20–60 items) that covers 80% of MVP use cases:
+	•	Flooring: porcelain tile m², laminate m², installation labor m²
+	•	Paint: paint per m² + labor
+	•	Plumbing: points (ponto hidráulico), fixtures ranges
+	•	Electrical: outlets/points
+	•	Cabinetry: linear meter or “module” costs (rough bands)
+
+import { PrismaClient } from "@prisma/client";
+const prisma = new PrismaClient();
+
+async function main() {
+  const items = [
+    { name: "Porcelain tile (material)", category: "flooring", unit: "m2", basePrice: 120, minPrice: 80, maxPrice: 220, sourceKind: "manual" },
+    { name: "Tile installation (labor)", category: "flooring", unit: "m2", basePrice: 75, minPrice: 50, maxPrice: 120, sourceKind: "manual" },
+    { name: "Interior paint (material)", category: "paint", unit: "m2", basePrice: 18, minPrice: 10, maxPrice: 30, sourceKind: "manual" },
+    { name: "Painting labor", category: "paint", unit: "m2", basePrice: 22, minPrice: 14, maxPrice: 40, sourceKind: "manual" },
+    { name: "Plumbing point (rough-in)", category: "hydraulics", unit: "un", basePrice: 450, minPrice: 300, maxPrice: 900, sourceKind: "manual" },
+    // add 30–50 more over 2 days and you can ship MVP
+  ];
+
+  for (const item of items) {
+    await prisma.catalogItem.upsert({
+      where: { sku: item.name }, // cheap unique hack for seed; replace with real sku later
+      update: { ...item },
+      create: { ...item, sku: item.name },
+    });
+  }
+}
+
+main()
+  .finally(async () => prisma.$disconnect());
+
+Why this matters: SINAPI ingestion can take a week to do right; the curated pack lets you validate now, then replace prices incrementally.
+
+⸻
+
+7) Estimation engine (API route)
+
+Create app/api/estimate/route.ts:
+
+import { NextResponse } from "next/server";
+import { PrismaClient } from "@prisma/client";
+import { computeEstimate } from "@/lib/estimate/engine";
+
+const prisma = new PrismaClient();
+
+export async function POST(req: Request) {
+  const inputs = await req.json();
+
+  const catalog = await prisma.catalogItem.findMany();
+  const estimate = computeEstimate(inputs, catalog);
+
+  // optionally persist
+  const project = await prisma.project.create({
+    data: {
+      title: inputs.title ?? "New Estimate",
+      city: inputs.city ?? "São Paulo",
+      state: inputs.state ?? "SP",
+      inputs,
+      estimate,
+      total: estimate.total,
+    },
+  });
+
+  return NextResponse.json({ projectId: project.id, estimate });
+}
+
+And lib/estimate/engine.ts (simple rules-based MVP):
+
+type CatalogItem = {
+  name: string;
+  category: string;
+  unit: string;
+  basePrice: number;
+  minPrice?: number | null;
+  maxPrice?: number | null;
+};
+
+export function computeEstimate(inputs: any, catalog: CatalogItem[]) {
+  // inputs example:
+  // { rooms: [{type:"kitchen", areaM2:12, flooring:"Porcelain tile", paint:true, ...}] }
+
+  const lines: any[] = [];
+  let total = 0;
+
+  for (const room of inputs.rooms ?? []) {
+    const area = Number(room.areaM2 ?? 0);
+
+    if (room.flooring) {
+      const mat = catalog.find(i => i.category === "flooring" && i.name.includes("(material)") && room.flooring.toLowerCase().includes("porcelain"));
+      const lab = catalog.find(i => i.category === "flooring" && i.name.includes("(labor)"));
+      if (mat) { lines.push({ room: room.type, item: mat.name, qty: area, unit: "m2", unitPrice: mat.basePrice, subtotal: area * mat.basePrice }); total += area * mat.basePrice; }
+      if (lab) { lines.push({ room: room.type, item: lab.name, qty: area, unit: "m2", unitPrice: lab.basePrice, subtotal: area * lab.basePrice }); total += area * lab.basePrice; }
+    }
+
+    if (room.paint) {
+      const pmat = catalog.find(i => i.category === "paint" && i.name.includes("(material)"));
+      const plab = catalog.find(i => i.category === "paint" && i.name.includes("labor"));
+      // rough: paintable wall area = 3x floor area (MVP heuristic)
+      const paintArea = area * 3;
+      if (pmat) { lines.push({ room: room.type, item: pmat.name, qty: paintArea, unit: "m2", unitPrice: pmat.basePrice, subtotal: paintArea * pmat.basePrice }); total += paintArea * pmat.basePrice; }
+      if (plab) { lines.push({ room: room.type, item: plab.name, qty: paintArea, unit: "m2", unitPrice: plab.basePrice, subtotal: paintArea * plab.basePrice }); total += paintArea * plab.basePrice; }
+    }
+  }
+
+  return {
+    currency: "BRL",
+    total,
+    lines,
+    byCategory: lines.reduce((acc, l) => {
+      acc[l.item] = (acc[l.item] ?? 0) + l.subtotal;
+      return acc;
+    }, {} as Record<string, number>),
+  };
+}
+
+This is intentionally simple: it gets you a working estimate product now.
+
+⸻
+
+8) Data ingestion: SINAPI + CUB (how to structure it)
+
+SINAPI ingestion module
+
+SINAPI is published by CAIXA and typically consumed via monthly reports/download pages.  ￼
+For MVP, build the ingestion as a pipeline that stores:
+	•	source file metadata (month, region, URL)
+	•	a normalized table of relevant items (you don’t need everything on day 1)
+
+Create scripts/sources/fetch-sinapi.ts as a placeholder fetcher (you’ll plug exact URLs once you pick the format you want: XLS, CSV, ZIP, PDF):
+
+/**
+ * MVP approach:
+ * 1) Download SINAPI monthly files manually once (SP + national).
+ * 2) Store them in /data/sinapi/
+ * 3) Parse and upsert to CatalogItem with sourceKind="SINAPI".
+ *
+ * Later: automate discovery/download from CAIXA download pages.
+ */
+import fs from "node:fs";
+import path from "node:path";
+import { PrismaClient } from "@prisma/client";
+
+const prisma = new PrismaClient();
+
+async function main() {
+  const month = process.env.SINAPI_MONTH || "2025-12";
+  const region = process.env.SINAPI_REGION || "SP";
+
+  // For MVP: assume you placed a cleaned CSV at data/sinapi/<month>-<region>.csv
+  const file = path.join(process.cwd(), "data", "sinapi", `${month}-${region}.csv`);
+  if (!fs.existsSync(file)) throw new Error(`Missing ${file}`);
+
+  const csv = fs.readFileSync(file, "utf8");
+  const rows = csv.split("\n").slice(1).filter(Boolean);
+
+  for (const r of rows) {
+    const [code, name, unit, price] = r.split(","); // adjust to your CSV columns
+    await prisma.catalogItem.upsert({
+      where: { sku: `SINAPI:${code}:${region}` },
+      update: {
+        name,
+        unit,
+        basePrice: Number(price),
+        sourceKind: "SINAPI",
+        sourceRef: code,
+      },
+      create: {
+        sku: `SINAPI:${code}:${region}`,
+        name,
+        category: "unclassified",
+        unit,
+        basePrice: Number(price),
+        sourceKind: "SINAPI",
+        sourceRef: code,
+      },
+    });
+  }
+
+  await prisma.priceSource.create({
+    data: { kind: "SINAPI", region, refMonth: month, raw: { file } },
+  });
+
+  console.log(`Imported SINAPI ${month} ${region}: ${rows.length} rows`);
+}
+
+main().finally(() => prisma.$disconnect());
+
+Important: Don’t boil the ocean. For MVP, you only need to map SINAPI rows into your few core categories (flooring/paint/plumbing/electrical/cabinetry) over time.
+
+CUB ingestion
+
+Sinduscon-SP publishes CUB and a historical download.  ￼
+Create scripts/sources/fetch-cub-sindusconsp.ts as a “store baseline” step:
+
+import { PrismaClient } from "@prisma/client";
+const prisma = new PrismaClient();
+
+async function main() {
+  const month = process.env.CUB_MONTH || "2025-12";
+  const region = "SP";
+  const cubR8N = Number(process.env.CUB_R8N || "2123.87"); // from Sinduscon-SP page/month
+
+  await prisma.priceSource.create({
+    data: {
+      kind: "CUB",
+      region,
+      refMonth: month,
+      raw: { cubR8N },
+    },
+  });
+
+  console.log(`Saved CUB baseline ${month} ${region}: R8-N = ${cubR8N}`);
+}
+
+main().finally(() => prisma.$disconnect());
+
+In the UI, show “Typical cost per m² (CUB reference)” and compare to your project estimate.
+
+⸻
+
+9) Environment variables
+
+.env.example:
+
+DATABASE_URL="postgresql://..."
+SINAPI_MONTH="2025-12"
+SINAPI_REGION="SP"
+CUB_MONTH="2025-12"
+CUB_R8N="2123.87"
+
+
+⸻
+
+10) “What exact APIs will you need?”
+
+Short version: you likely won’t get clean APIs on day 1; you’ll ingest monthly published files.
+	•	SINAPI: primary national reference; published by CAIXA/IBGE and provided via official downloads.  ￼
+	•	CUB: state association publications (e.g., Sinduscon-SP) + cub.org.br listing.  ￼
+
+If you want “live” market prices later:
+	•	you’ll end up integrating retailers (Leroy, etc.) or marketplace scraping—this is Phase 2/3 and has ToS/legal considerations.
+
+⸻
+
+11) What I need from you to “lock” the ingestion quickly (no extra back-and-forth)
+
+Pick your MVP path:
+
+Path 1 (fastest): Manual SINAPI CSV upload
+	•	You manually download SINAPI for SP for one month and convert to CSV.
+	•	You drop it into /data/sinapi/2025-12-SP.csv.
+	•	Run node scripts/sources/fetch-sinapi.ts.
+
+Path 2 (more automated): Build a “source fetcher”
+	•	We write a script that crawls the CAIXA download page and grabs the newest file(s).
+This is doable, but depends on how CAIXA structures links (sometimes it changes).
+

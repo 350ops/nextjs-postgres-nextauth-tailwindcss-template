@@ -1,0 +1,45 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Project {
+  id          String   @id @default(cuid())
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  title       String
+  city        String   @default("São Paulo")
+  state       String   @default("SP")
+  currency    String   @default("BRL")
+  inputs      Json     // wizard inputs snapshot
+  estimate    Json     // computed breakdown snapshot
+  total       Float    @default(0)
+}
+
+model PriceSource {
+  id        String   @id @default(cuid())
+  kind      String   // "SINAPI" | "CUB"
+  region    String   // "SP" | "BR"
+  refMonth  String   // "2025-12"
+  url       String?
+  fetchedAt DateTime @default(now())
+  raw       Json     // metadata about parsed files
+}
+
+model CatalogItem {
+  id          String   @id @default(cuid())
+  sku         String?  @unique
+  name        String
+  category    String   // "flooring" | "paint" | "hydraulics" | "cabinetry"...
+  unit        String   // "m2" | "m" | "un" | "hour"
+  basePrice   Float    // fallback price (SP)
+  minPrice    Float?
+  maxPrice    Float?
+  sourceKind  String?  // "SINAPI" | "manual"
+  sourceRef   String?  // e.g. SINAPI code
+  updatedAt   DateTime @updatedAt
+}
